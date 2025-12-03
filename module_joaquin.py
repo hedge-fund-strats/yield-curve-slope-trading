@@ -7,7 +7,8 @@ from typing import Optional, Sequence
 
 
 def rolling_pca(df: pd.DataFrame,
-                window_size: int,
+                corr_window_size: int,
+                vol_window_size: int,
                 recalibration_period: int,
                 columns: Optional[Sequence[str]] = None,
                 is_diff: bool = True,
@@ -24,25 +25,42 @@ def rolling_pca(df: pd.DataFrame,
     all_scores = []
     all_index = []
 
-    if n_obs < window_size:
-        raise ValueError("window_size bigger than number of observations")
+    if n_obs < corr_window_size:
+        raise ValueError("window_size bigger than number of observations.")
+    if vol_window_size > corr_window_size:
+        raise ValueError("Volatility window should be smaller than correlation window.")
+    if recalibration_period > vol_window_size:
+        raise ValueError("Recalibration period shoulf be smaller than volatility window.")
 
-    for i in range(window_size, n_obs, recalibration_period):
+    for i in range(corr_window_size, n_obs, recalibration_period):
         key = df2.index[i].strftime("%Y-%m-%d")
-        X = df2.iloc[i - window_size:i, :].to_numpy()
-        pca = PCA(n_components=3).fit(X)
-        mean = pca.mean_.copy()
-        loadings = pca.components_.copy() # shape (3, n_mats)
+        # using corr window
+        X = df2.iloc[i - corr_window_size:i, :].to_numpy()
+        corr = np.corrcoef(X.T)  # shape (n_mats, n_mats)
+        # using vol window
+        vol = np.std(X[corr_window_size - vol_window_size : corr_window_size, :], axis=0, ddof=1)
+        mean = np.mean(X[corr_window_size - vol_window_size : corr_window_size, :], axis=0)
+        cov = vol.T * corr * vol
+
+        if np.any(~np.isfinite(corr)):
+            raise ValueError("Correlation matrix not finite")
+
+        if np.any(~np.isfinite(vol)):
+            raise ValueError("Volatility vector not finite")
+
+        U, S, U_transpose = np.linalg.svd(cov)
+        explained_variance = S[:3] / S.sum()
+        loadings = U[:, :3].T  # first three components; shape (3, n_mats)
 
         start = i - 1
         end = min(i + recalibration_period - 1, n_obs)
         Y = df2.iloc[start:end, :].to_numpy()
 
         # make the sign correction based on the training sample X
-        sign_correction(loadings = loadings,
-                       scores = (X - mean) @ loadings.T,
-                       X = X,
-                       df = df2)
+        sign_correction(loadings=loadings,
+                        scores=(X - mean) @ loadings.T,
+                        X=X,
+                        df=df2)
 
         # second layer of sign corrections: maximize the similarity with the previous PCA loadings.
         if all_loadings:
@@ -59,10 +77,10 @@ def rolling_pca(df: pd.DataFrame,
         all_index.extend(score_index)
 
         pca_collection[key] = {
-            "explained_var_ratio": pca.explained_variance_ratio_,
+            "explained_var_ratio": explained_variance,
             "loadings": loadings,
-            "original_loadings": pca.components_,
             "mean": mean,
+            "vol": vol,
             "score_index": score_index,
             "scores": scores,
         }
@@ -76,9 +94,9 @@ def rolling_pca(df: pd.DataFrame,
 
 
 def sign_correction(loadings: np.ndarray,
-                         scores: np.ndarray,
-                         X: np.ndarray,
-                         df: pd.DataFrame):
+                    scores: np.ndarray,
+                    X: np.ndarray,
+                    df: pd.DataFrame):
     """
     Align PCA signs so that PCs have a stable economic meaning.
     Works whether PCA was run on levels or on differences of rates,
@@ -94,12 +112,12 @@ def sign_correction(loadings: np.ndarray,
     idx_5y = df.columns.get_loc("5Y")
     idx_10y = df.columns.get_loc("10Y")
 
-    #PC1: Level
+    # PC1: Level
     avg_delta = X.mean(axis=1)  # cross-sectional avg change each day
     if np.corrcoef(scores[:, 0], avg_delta)[0, 1] < 0:
         loadings[0, :] *= -1
 
-    #PC2: Slope
+    # PC2: Slope
     slope_scores = scores[:, 1]
     short = X[:, idx_2y]
     long = X[:, idx_10y]
@@ -116,5 +134,3 @@ def sign_correction(loadings: np.ndarray,
         loadings[2, :] *= -1
 
     return None
-
-
