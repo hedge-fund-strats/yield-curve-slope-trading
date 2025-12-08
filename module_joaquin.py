@@ -108,9 +108,9 @@ def sign_correction(loadings: np.ndarray,
       PC3 (curv):   positive => more curvature (5Y up vs 2Y/10Y)
     """
     # indices of rates.
-    idx_2y = df.columns.get_loc("2Y")
-    idx_5y = df.columns.get_loc("5Y")
-    idx_10y = df.columns.get_loc("10Y")
+    idx_2y = df.columns.get_loc("USD2y1y")
+    idx_5y = df.columns.get_loc("USD5y2y")
+    idx_10y = df.columns.get_loc("USD10y5y")
 
     # PC1: Level
     avg_delta = X.mean(axis=1)  # cross-sectional avg change each day
