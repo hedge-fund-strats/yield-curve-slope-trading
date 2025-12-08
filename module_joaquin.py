@@ -108,9 +108,16 @@ def sign_correction(loadings: np.ndarray,
       PC3 (curv):   positive => more curvature (5Y up vs 2Y/10Y)
     """
     # indices of rates.
-    idx_2y = df.columns.get_loc("USD2y1y")
-    idx_5y = df.columns.get_loc("USD5y2y")
-    idx_10y = df.columns.get_loc("USD10y5y")
+    def _find_col(df, candidates):
+        for name in candidates:
+            if name in df.columns:
+                return df.columns.get_loc(name)
+        raise KeyError(f"None of {candidates} found in df.columns")
+
+    idx_2y = _find_col(df, ["USD2y1y", "2Y"])
+    idx_5y = _find_col(df, ["USD5y2y", "5Y"])
+    idx_10y = _find_col(df, ["USD10y5y", "10Y"])
+
 
     # PC1: Level
     avg_delta = X.mean(axis=1)  # cross-sectional avg change each day
