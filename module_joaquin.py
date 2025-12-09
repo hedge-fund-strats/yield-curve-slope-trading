@@ -201,7 +201,7 @@ def build_pca_lookup(pca_collection):
 
 def dv01_neutral_portfolio(loading: np.ndarray, rates: pd.Series):
     """
-    Projection of the PC2 loading onto DV01 subspace.
+    Projection of the PC2 loading onto DV01-neutral hyperplane.
     Obtained a DV01-neutral portfolio that is as close as possible to PC2 loadings.
     :param loading:
     :param rates:
