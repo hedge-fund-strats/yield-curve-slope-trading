@@ -143,25 +143,6 @@ def sign_correction(loadings: np.ndarray,
     return None
 
 
-def annuity_vector(rates: pd.Series):
-    """
-    Input rates is a slice of 10 buckets
-    ['USD1y1y', 'USD2y1y', 'USD3y1y', 'USD4y1y', 'USD5y2y', 'USD7y3y',
-       'USD10y5y', 'USD15y5y', 'USD20y5y', 'USD25y5y']
-    Compute a rough approximation of a yield curve to obtain the annuity of these swaps.
-    Assumes flat rates between buckets.
-    """
-    time_interval = np.array([1, 1, 1, 1, 1, 2, 3, 5, 5, 5], dtype=int)
-    r = np.asarray(rates)
-    expanded_rates = np.repeat(r, time_interval)
-    integral_rate = np.cumsum(expanded_rates)
-    dis_factor = np.exp(-integral_rate)
-    alpha = 1.0
-    annuity = np.cumsum(alpha * dis_factor)
-    idx = np.cumsum(time_interval) - 1
-    return annuity[idx]
-
-
 def build_pca_lookup(pca_collection):
     """
     pca_collection: dict[datetime-like -> dict(..., 'loadings': ...)]
@@ -199,30 +180,29 @@ def build_pca_lookup(pca_collection):
     return lookup
 
 
-def dv01_neutral_portfolio(loading: np.ndarray, rates: pd.Series):
+def ema_strat(score: pd.DataFrame,
+              pca_collecion: dict,
+              df: pd.DataFrame,
+              slope_portfolio: np.ndarray,
+              short: int = 30,
+              long: int = 90,
+              threshold: float = 0.0001):
     """
-    Projection of the PC2 loading onto DV01-neutral hyperplane.
-    Obtained a DV01-neutral portfolio that is as close as possible to PC2 loadings.
-    :param loading:
-    :param rates:
-    :return:
-    """
-    loading = np.asarray(loading, dtype=float)
-    annuity = annuity_vector(rates)
-    portfolio = loading * annuity - (loading * annuity).mean()
-    return portfolio
-
-def ema_strat(score, pca_collecion, df, short=30, long=90, threshold=0.0001):
-    """
-    Mean reversion strategy using two EMAs:
+    Mean reversion strategy using two exponentialy weighted moving averages:
 
       Entry (with threshold):
         - Go Short when price > max(EMA_short, EMA_long) + threshold
         - Go Long  when price < min(EMA_short, EMA_long) - threshold
 
-      Exit (no threshold; i.e. threshold = 0):
-        - Close Long when price >= min(EMA_short, EMA_long)
-        - Close Short when price <= max(EMA_short, EMA_long)
+      Exit (no threshold, exit when back to the level of long MA):
+        - Close Long when price >= EMA_long
+        - Close Short when price <= EMA_long
+
+    Inputs:
+    - score: Time-series of the principal components' score
+    - pca_collection: Dictionary that contains the pca models over time. (It might be not necessary)
+    - df: Rates dataset.
+    - slope_portfolio: shape (tenors,); the DV01-neutral portfolio use to take position on the slope of yield curve.
     """
     # --- parameter checks ---
     short, long = int(short), int(long)
@@ -233,14 +213,14 @@ def ema_strat(score, pca_collecion, df, short=30, long=90, threshold=0.0001):
 
     # --- indicators ---
     score_2["ema_short"] = score["PC2"].ewm(span=short).mean()
-    score_2["ema_long"]  = score["PC2"].ewm(span=long).mean()
+    score_2["ema_long"] = score["PC2"].ewm(span=long).mean()
 
     hi = score_2[["ema_short", "ema_long"]].max(axis=1)
     lo = score_2[["ema_short", "ema_long"]].min(axis=1)
 
     prices = score_2["PC2"].values
-    hi_vals = hi.values
-    lo_vals = lo.values
+    hi_values = hi.values
+    lo_values = lo.values
     ema_long_vals = score_2["ema_long"].values
     dates = score_2.index.values
 
@@ -253,7 +233,7 @@ def ema_strat(score, pca_collecion, df, short=30, long=90, threshold=0.0001):
 
     pca_lookup = build_pca_lookup(pca_collecion)
 
-    for px, h, l, ema_l, date in zip(prices, hi_vals, lo_vals, ema_long_vals, dates):
+    for px, h, l, ema_l, date in zip(prices, hi_values, lo_values, ema_long_vals, dates):
         # still in warmup: no position
         if np.isnan(ema_l):
             pos = 0
@@ -261,33 +241,31 @@ def ema_strat(score, pca_collecion, df, short=30, long=90, threshold=0.0001):
             # --- entry rules (with threshold) ---
             if pos == 0:
                 if px > h + threshold:
-                    pos = -1      # enter short
+                    pos = -1  # enter short
                     entry_date = date
                     pos_trade = -1
                 elif px < l - threshold:
-                    pos = 1       # enter long
+                    pos = 1  # enter long
                     entry_date = date
                     pos_trade = 1
 
             # --- exit rules (threshold = 0) ---
-            elif pos == 1:        # currently long
-                if px >= l:       # price back above lower band
+            elif pos == 1:  # currently long
+                if px >= ema_l:  # price back above lower band
                     pos = 0
                     exit_date = date
-            elif pos == -1:       # currently short
-                if px <= h:       # price back below upper band
+            elif pos == -1:  # currently short
+                if px <= ema_l:  # price back below upper band
                     pos = 0
                     exit_date = date
 
         if entry_date and exit_date:
-            loading = pca_lookup(entry_date)
-            portfolio = dv01_neutral_portfolio(loading[1, :],
-                                                     df.loc[entry_date])
+            loading = pca_lookup(entry_date)  # look for the latest PCA loadigs from pca_collections
             trades.append({"entry_date": entry_date,
-                           "exit_date":exit_date,
+                           "exit_date": exit_date,
                            "position": pos_trade,
-                           "pc_loading":loading[1,:],
-                           "portfolio":portfolio})
+                           "pc_loading": loading[1, :],
+                           "portfolio": slope_portfolio})
 
             entry_date = None
             exit_date = None
@@ -300,16 +278,13 @@ def ema_strat(score, pca_collecion, df, short=30, long=90, threshold=0.0001):
 
     # Enforce close the position at the final day
     score_2.loc[score_2.index[-1], "position"] = 0
-    if entry_date :
+    if entry_date:
         loading = pca_lookup(entry_date)
-        portfolio = dv01_neutral_portfolio(loading[1, :],
-                                           df.loc[entry_date])
-
         trades.append({"entry_date": entry_date,
                        "exit_date": score_2.index[-1],
                        "position": pos_trade,
-                       "pc_loading": loading[1,:],
-                       "portfolio": portfolio})
+                       "pc_loading": loading[1, :],
+                       "portfolio": slope_portfolio})
 
     # compute metrics of the trades
     for trade in trades:
@@ -317,21 +292,23 @@ def ema_strat(score, pca_collecion, df, short=30, long=90, threshold=0.0001):
         trading_days = sub.shape[0]
         trade["days"] = trading_days
 
-        w = trade["portfolio"]
-        mtm = (sub - sub[0]) @ w
-        trade["mtm"] = mtm
+        w = trade["portfolio"] * trade["position"]
+        mtm = (sub - sub[0]) @ w * 10_000 #mtm in basis points
+        trade["mtm"] = np.round(mtm, 2)
 
-        ret = sub[-1] - sub[0]
-        pnl = np.dot(w, ret)
-        trade["pnl"] = pnl
+        trade["pnl"] = np.round(mtm[-1], 2)# pnl in basis points
 
-        vol_trade = np.std(np.diff(mtm), ddof=0)  # same as np.sqrt(w.T @ np.cov(np.diff(sub, axis=0).T) @ w)
-        trade["vol"] = vol_trade
+        if trading_days > 1:
+            vol_trade = np.std(np.diff(mtm), ddof=0)  # same as np.sqrt(w.T @ np.cov(np.diff(sub, axis=0).T) @ w)
+            trade["vol"] = round(vol_trade, 3)
+        else:
+            trade["vol"] = 0.0
 
     return trades, score_2
 
-def ema_strat_sharpe(scores, pca, df, short=30, long=90, threshold=0.0001):
-    trades, _ = ema_strat(scores, pca, df, short, long, threshold)
+
+def ema_strat_trading_sharpe(scores, pca, df, portfolio, short=30, long=90, threshold=0.0001):
+    trades, _ = ema_strat(scores, pca, df, portfolio, short, long, threshold)
     sum_vol = 0
     sum_pnl = 0
     sum_days = 0
@@ -345,3 +322,39 @@ def ema_strat_sharpe(scores, pca, df, short=30, long=90, threshold=0.0001):
         return -np.inf
 
     return sum_pnl / (sum_vol * np.sqrt(sum_days))
+
+
+##########################################
+# Old Functions
+
+def dv01_neutral_portfolio(loading: np.ndarray, rates: pd.Series):
+    """
+    Projection of the PC2 loading onto DV01-neutral hyperplane.
+    Obtained a DV01-neutral portfolio that is as close as possible to PC2 loadings.
+    :param loading:
+    :param rates:
+    :return:
+    """
+    loading = np.asarray(loading, dtype=float)
+    annuity = annuity_vector(rates)
+    portfolio = loading * annuity - (loading * annuity).mean()
+    return portfolio
+
+
+def annuity_vector(rates: pd.Series):
+    """
+    Input rates is a slice of 10 buckets
+    ['USD1y1y', 'USD2y1y', 'USD3y1y', 'USD4y1y', 'USD5y2y', 'USD7y3y',
+       'USD10y5y', 'USD15y5y', 'USD20y5y', 'USD25y5y']
+    Compute a rough approximation of a yield curve to obtain the annuity of these swaps.
+    Assumes flat rates between buckets.
+    """
+    time_interval = np.array([1, 1, 1, 1, 1, 2, 3, 5, 5, 5], dtype=int)
+    r = np.asarray(rates)
+    expanded_rates = np.repeat(r, time_interval)
+    integral_rate = np.cumsum(expanded_rates)
+    dis_factor = np.exp(-integral_rate)
+    alpha = 1.0
+    annuity = np.cumsum(alpha * dis_factor)
+    idx = np.cumsum(time_interval) - 1
+    return annuity[idx]
