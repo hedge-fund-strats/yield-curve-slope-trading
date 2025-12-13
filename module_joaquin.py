@@ -115,9 +115,9 @@ def sign_correction(loadings: np.ndarray,
                 return df.columns.get_loc(name)
         raise KeyError(f"None of {candidates} found in df.columns")
 
-    idx_2y = _find_col(df, ["USD2y1y", "2Y"])
-    idx_5y = _find_col(df, ["USD5y2y", "5Y"])
-    idx_10y = _find_col(df, ["USD10y5y", "10Y"])
+    idx_2y = _find_col(df, ["USD1y1y", "2Y"])
+    idx_5y = _find_col(df, ["USD4y1y", "5Y"])
+    idx_10y = _find_col(df, ["USD7y3y", "10Y"])
 
     # PC1: Level
     avg_delta = X.mean(axis=1)  # cross-sectional avg change each day
@@ -309,17 +309,20 @@ def ema_strat(score: pd.DataFrame,
 
 def ema_strat_trading_sharpe(scores, pca, df, portfolio, short=30, long=90, threshold=0.0001):
     trades, _ = ema_strat(scores, pca, df, portfolio, short, long, threshold)
-    sum_vol = 0
+    mtm_concat = np.ones(shape=(1,))
     sum_pnl = 0
     sum_days = 0
+
     for trade in trades:
-        sum_vol += trade["vol"]
+        mtm_concat = np.concatenate([mtm_concat, trade["mtm"]])
         sum_pnl += trade["pnl"]
         sum_days += trade["days"]
 
     # unrealistic strategy
     if sum_days <= 10 or len(trades) < 4:
         return -np.inf
+
+    sum_vol = np.std(np.diff(mtm_concat[1:]), ddof=0)
 
     return sum_pnl / (sum_vol * np.sqrt(sum_days))
 
