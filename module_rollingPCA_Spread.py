@@ -125,8 +125,9 @@ class SpreadTradesRollingPCA:
         df_signal = pd.DataFrame(df_signal)
         df_signal.index.name = 'Trade Day'
         df_signal['Trade_date'] = df_signal.index
-        df_signal.loc[-1,'Position'] = 0 # Close position if any at the end
+        #df_signal.loc[-1,'Position'] = 0 # Close position if any at the end
         df_signal['Cumulative_PnL'] = df_signal['Daily_PnL'].cumsum()
+        df_signal['Cumulative_Index'] = 100 * (1 + df_signal['Daily_PnL']/100).cumprod()
         df_signal['Trade_ID'] = (df_signal['Position'] != df_signal['Position'].shift()).cumsum()
 
         self.df_signal = df_signal    
@@ -136,7 +137,7 @@ class SpreadTradesRollingPCA:
         return df_signal
     
 
-    def summarize_strategy_performance(self):
+    def summarize_trade_performance(self):
         # 1. Identify Discrete Trades
         df = self.df_signal.copy()
         
@@ -252,3 +253,37 @@ def plot_backtest_summary(df_backtest):
 
     plt.tight_layout()
     plt.show()
+
+def strategy_metrics(df_backtest, risk_free_rate=0.0):
+    
+    # 1. Total Return from the Index
+    start_val = df_backtest['Cumulative_Index'].iloc[0]
+    end_val = df_backtest['Cumulative_Index'].iloc[-1]
+    total_return = (end_val / start_val) - 1 # Should start 100
+    
+    # 2. Annualized Return (CAGR)
+    n_days = len(df_backtest)
+    years = n_days / 252
+    annualized_return = (1 + total_return)**(1 / years) - 1
+    
+    # 3. Annualized Volatility
+    # Sigma_ann = Sigma_daily * sqrt(252)
+    daily_vol = df_backtest['Daily_PnL'].std()/100
+    annualized_vol = daily_vol * np.sqrt(252)
+    
+    # 4. Sharpe Ratio
+    sharpe_ratio = (annualized_return - risk_free_rate) / annualized_vol
+    
+    # 5. Max Drawdown (Bonus)
+    # Measured as the peak-to-trough decline in the Cumulative Index
+    rolling_max = df_backtest['Cumulative_Index'].cummax()
+    drawdowns = (df_backtest['Cumulative_Index'] / rolling_max) - 1
+    max_drawdown = drawdowns.min()
+
+    return {
+        'Total Return': total_return,
+        'Annualized Return': annualized_return,
+        'Annualized Volatility': annualized_vol,
+        'Sharpe Ratio': sharpe_ratio,
+        'Max Drawdown': max_drawdown
+    }
